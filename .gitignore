@@ -1,0 +1,46 @@
+# =========================
+# Entorno Virtual
+# =========================
+venv/
+env/
+.venv/
+
+# =========================
+# Variables de Entorno y Secretos
+# =========================
+.env
+*.pem
+*.key
+
+# =========================
+# Archivos de Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# =========================
+# Carpetas de Datos y Contexto (RAG)
+# =========================
+# Aquí ignoramos los documentos cargados y la base de datos vectorial
+data/
+documentos/
+uploads/
+chroma_db/
+faiss_index/
+*.index
+*.db
+*.sqlite3
+
+Contexto/
+
+
+# =========================
+# IDEs y OS
+# =========================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
