@@ -6,12 +6,14 @@ Fase 4: Interfaz Web - Integración Frontend/Backend.
 Endpoints:
   GET  /                      - Sirve la interfaz HTML (index.html)
   POST /api/documents/upload  - Carga, procesa e indexa documentos en FAISS
+  DELETE /api/documents/reset - Borra el índice FAISS y reinicia la base de conocimientos
   POST /api/chat              - Consulta RAG real (retriever FAISS + Gemini LLM)
   POST /api/feedback          - Registro de feedback del usuario
 """
 
 import uuid
 import logging
+import shutil
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Literal
@@ -44,18 +46,9 @@ class Settings(BaseSettings):
     app_port: int = 8000
     app_env: str = "development"
 
-    # Proveedor LLM activo
-    llm_provider: Literal["gemini", "azure"] = "gemini"
-
     # Google Gemini
     google_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
-
-    # Azure OpenAI
-    azure_openai_api_key: str = ""
-    azure_openai_endpoint: str = ""
-    azure_openai_deployment_name: str = ""
-    azure_openai_api_version: str = "2024-02-01"
 
     # CORS
     allowed_origins: str = "http://localhost:3000,http://localhost:5173"
@@ -88,47 +81,14 @@ logging.basicConfig(
 logger = logging.getLogger("rag_api")
 
 # ---------------------------------------------------------------------------
-# Fábrica del LLM (abstracción Gemini / Azure OpenAI)
-# ---------------------------------------------------------------------------
-
-def get_llm():
-    """
-    Devuelve el LLM configurado según la variable LLM_PROVIDER.
-
-    En fases posteriores se inyectará en el pipeline RAG.
-    """
-    if settings.llm_provider == "gemini":
-        from langchain_google_genai import ChatGoogleGenerativeAI  # type: ignore
-        logger.info("LLM: Google Gemini (%s)", settings.gemini_model)
-        return ChatGoogleGenerativeAI(
-            model=settings.gemini_model,
-            google_api_key=settings.google_api_key,
-            temperature=0.2,
-        )
-
-    if settings.llm_provider == "azure":
-        from langchain_openai import AzureChatOpenAI  # type: ignore
-        logger.info("LLM: Azure OpenAI (%s)", settings.azure_openai_deployment_name)
-        return AzureChatOpenAI(
-            azure_endpoint=settings.azure_openai_endpoint,
-            azure_deployment=settings.azure_openai_deployment_name,
-            api_key=settings.azure_openai_api_key,
-            api_version=settings.azure_openai_api_version,
-            temperature=0.2,
-        )
-
-    raise ValueError(f"LLM_PROVIDER no reconocido: '{settings.llm_provider}'")
-
-
-# ---------------------------------------------------------------------------
 # Ciclo de vida de la aplicación
 # ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Inicialización y limpieza al arrancar / apagar el servidor."""
-    logger.info("🚀 Iniciando Sistema RAG (provider: %s, env: %s)",
-                settings.llm_provider, settings.app_env)
+    logger.info("🚀 Iniciando Sistema RAG (LLM: Google Gemini, env: %s)",
+                settings.app_env)
     logger.info("📂 Índice FAISS se cargará bajo demanda desde: %s",
                 settings.vector_store_path)
     yield
@@ -210,6 +170,11 @@ class DocumentUploadResponse(BaseModel):
     message: str
 
 
+class DocumentResetResponse(BaseModel):
+    status: str
+    message: str
+
+
 # --- Chat ---
 
 class ChatRequest(BaseModel):
@@ -243,7 +208,27 @@ class FeedbackResponse(BaseModel):
     message: str
 
 
-# ===========================================================================
+# --- Analytics ---
+
+class CommentRecord(BaseModel):
+    feedback_id: str
+    rating: str
+    comment: str
+    timestamp: str
+
+
+class AnalyticsResponse(BaseModel):
+    total_interactions: int = Field(..., description="Total de interacciones con feedback")
+    total_likes: int = Field(..., description="Total de likes")
+    total_dislikes: int = Field(..., description="Total de dislikes")
+    approval_rate: float = Field(..., description="Porcentaje de aprobación (likes / total * 100)")
+    comments_with_text: list[CommentRecord] = Field(..., description="Comentarios que contienen texto")
+    total_comments: int = Field(..., description="Total de comentarios con texto")
+
+
+class AnalyticsClearResponse(BaseModel):
+    status: str
+    message: str
 # Endpoints
 # ===========================================================================
 
@@ -277,7 +262,7 @@ async def health_check():
         "service": "Sistema RAG Avanzado",
         "version": app.version,
         "env": settings.app_env,
-        "llm_provider": settings.llm_provider,
+        "llm_model": settings.gemini_model,
     }
 
 
@@ -356,6 +341,55 @@ async def upload_document(file: UploadFile = File(...)):
             f"{chunks_indexed} chunks indexados en el vector store."
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/documents/reset  — Reinicia la base de conocimientos
+# ---------------------------------------------------------------------------
+
+@app.delete(
+    "/api/documents/reset",
+    response_model=DocumentResetResponse,
+    status_code=status.HTTP_200_OK,
+    tags=["Documentos"],
+    summary="Elimina el índice FAISS y reinicia la base de conocimientos",
+)
+async def reset_documents():
+    """
+    Elimina completamente el índice FAISS almacenado en disco.
+    Esto reinicia la base de conocimientos a un estado vacío.
+
+    **Advertencia:** Esta operación es irreversible. Se borrarán todos los documentos indexados.
+
+    Retorna:
+      - status: "success" si se eliminó correctamente
+      - message: Confirmación con detalles
+    """
+    vector_store_path = Path(settings.vector_store_path)
+    logger.info("🗑️ Reinicio de base de conocimientos solicitado (ruta: %s)", vector_store_path)
+
+    try:
+        if vector_store_path.exists() and vector_store_path.is_dir():
+            shutil.rmtree(vector_store_path)
+            logger.info("✅ Índice FAISS eliminado correctamente de: %s", vector_store_path)
+            return DocumentResetResponse(
+                status="success",
+                message=f"Base de conocimientos reiniciada. Se eliminó el índice en '{vector_store_path}'.",
+            )
+        else:
+            # La carpeta no existe, pero no es error
+            logger.warning("⚠️ Intento de reset pero la carpeta FAISS no existe: %s", vector_store_path)
+            return DocumentResetResponse(
+                status="success",
+                message="La base de conocimientos ya estaba vacía (no había índice que eliminar).",
+            )
+
+    except Exception as exc:
+        logger.error("❌ Error al reiniciar la base de conocimientos: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al eliminar el índice FAISS: {str(exc)}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -456,22 +490,191 @@ async def submit_feedback(request: FeedbackRequest):
     """
     Almacena la valoración del usuario sobre una respuesta del chat.
 
-    **Fase 1:** registro en log (sin persistencia).
-    **Fase 2:** guardar en base de datos para análisis de calidad.
+    **Fase 1:** Persiste en un archivo JSON local (data/feedback.json).
+    **Fase Future:** Migrar a base de datos SQL para análisis de calidad en escala.
+
+    Registra:
+      - feedback_id: UUID único del feedback
+      - message_id: ID de la respuesta que recibe feedback
+      - rating: "like" o "dislike"
+      - comment: Comentario opcional del usuario
+      - timestamp: Marca de tiempo de creación
     """
+    import json
+    from datetime import datetime
+
     feedback_id = str(uuid.uuid4())
+    timestamp = datetime.now().isoformat()
 
-    logger.info(
-        "Feedback [id=%s] msg=%s | rating=%s | comment=%s",
-        feedback_id, request.message_id, request.rating,
-        request.comment or "—",
-    )
+    # Crear carpeta data/ si no existe
+    data_dir = PROJECT_ROOT / "data"
+    data_dir.mkdir(exist_ok=True)
+    feedback_file = data_dir / "feedback.json"
 
-    # TODO Fase 2: persistir en BD (SQLite / PostgreSQL)
-    #             y calcular métricas de calidad (tasa likes/dislikes).
+    # Construir registro de feedback
+    feedback_record = {
+        "feedback_id": feedback_id,
+        "message_id": request.message_id,
+        "rating": request.rating,
+        "comment": request.comment,
+        "timestamp": timestamp,
+    }
 
+    # Leer feedback existente o inicializar con lista vacía
+    try:
+        if feedback_file.exists():
+            with open(feedback_file, "r", encoding="utf-8") as f:
+                feedbacks = json.load(f)
+        else:
+            feedbacks = []
+    except json.JSONDecodeError:
+        feedbacks = []
+
+    # Agregar nuevo feedback
+    feedbacks.append(feedback_record)
+
+    # Guardar en archivo
+    try:
+        with open(feedback_file, "w", encoding="utf-8") as f:
+            json.dump(feedbacks, f, indent=2, ensure_ascii=False)
+        logger.info(
+            "✅ Feedback guardado [id=%s] msg=%s | rating=%s | file=%s",
+            feedback_id, request.message_id, request.rating, feedback_file,
+        )
+    except Exception as exc:
+        logger.error("❌ Error al guardar feedback en archivo: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al guardar el feedback. Revisa los logs del servidor.",
+        )
+
+    # Retornar confirmación exitosa
     emoji = "👍" if request.rating == "like" else "👎"
     return FeedbackResponse(
         feedback_id=feedback_id,
-        message=f"Feedback {emoji} registrado correctamente. ¡Gracias!",
+        message=f"Feedback {emoji} registrado correctamente. ¡Gracias por tu opinión!",
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/analytics  — Obtener métricas de calidad
+# ---------------------------------------------------------------------------
+
+@app.get(
+    "/api/analytics",
+    response_model=AnalyticsResponse,
+    tags=["Analytics"],
+    summary="Obtiene las métricas de calidad basadas en el feedback del usuario",
+)
+async def get_analytics():
+    """
+    Lee el archivo `data/feedback.json` y retorna estadísticas agregadas:
+      - Total de interacciones
+      - Likes vs Dislikes
+      - Tasa de aprobación
+      - Lista de comentarios con texto
+    """
+    import json
+
+    feedback_file = PROJECT_ROOT / "data" / "feedback.json"
+
+    # Inicializar contadores
+    total_likes = 0
+    total_dislikes = 0
+    comments_with_text = []
+
+    # Leer feedback si existe
+    if feedback_file.exists():
+        try:
+            with open(feedback_file, "r", encoding="utf-8") as f:
+                feedbacks = json.load(f)
+
+            for feedback in feedbacks:
+                rating = feedback.get("rating", "").lower()
+                if rating == "like":
+                    total_likes += 1
+                elif rating == "dislike":
+                    total_dislikes += 1
+
+                # Recopilar comentarios con texto (maneja None correctamente)
+                comment = (feedback.get("comment") or "").strip()
+                if comment:
+                    comments_with_text.append(
+                        CommentRecord(
+                            feedback_id=feedback.get("feedback_id", ""),
+                            rating=rating,
+                            comment=comment,
+                            timestamp=feedback.get("timestamp", ""),
+                        )
+                    )
+
+        except json.JSONDecodeError:
+            logger.warning("⚠️ Error decodificando feedback.json, retornando valores vacíos")
+    else:
+        logger.info("ℹ️ Archivo feedback.json no existe aún")
+
+    # Calcular métricas
+    total_interactions = total_likes + total_dislikes
+    approval_rate = (
+        (total_likes / total_interactions * 100) if total_interactions > 0 else 0
+    )
+
+    logger.info(
+        "📊 Analytics: total=%d, likes=%d, dislikes=%d, approval=%.1f%%",
+        total_interactions, total_likes, total_dislikes, approval_rate,
+    )
+
+    return AnalyticsResponse(
+        total_interactions=total_interactions,
+        total_likes=total_likes,
+        total_dislikes=total_dislikes,
+        approval_rate=approval_rate,
+        comments_with_text=comments_with_text,
+        total_comments=len(comments_with_text),
+    )
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/analytics/clear  — Eliminar todo el feedback y comentarios
+# ---------------------------------------------------------------------------
+
+@app.delete(
+    "/api/analytics/clear",
+    response_model=AnalyticsClearResponse,
+    status_code=status.HTTP_200_OK,
+    tags=["Analytics"],
+    summary="Elimina todo el historial de feedback y comentarios",
+)
+async def clear_analytics():
+    """
+    Elimina el archivo `data/feedback.json` completamente.
+    Esto reinicia las métricas de calidad a cero.
+
+    **Advertencia:** Esta operación es irreversible. Se borrarán todos los feedbacks.
+    """
+    import json
+
+    feedback_file = PROJECT_ROOT / "data" / "feedback.json"
+    logger.info("🗑️ Limpieza de feedback solicitada (ruta: %s)", feedback_file)
+
+    try:
+        if feedback_file.exists():
+            feedback_file.unlink()  # Elimina el archivo
+            logger.info("✅ Archivo de feedback eliminado correctamente")
+            return AnalyticsClearResponse(
+                status="success",
+                message="Historial de feedback y comentarios eliminado correctamente.",
+            )
+        else:
+            logger.warning("⚠️ Intento de clear pero feedback.json no existe")
+            return AnalyticsClearResponse(
+                status="success",
+                message="El historial de feedback ya estaba vacío.",
+            )
+
+    except Exception as exc:
+        logger.error("❌ Error al eliminar feedback.json: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al eliminar el historial de feedback: {str(exc)}",
+        )
