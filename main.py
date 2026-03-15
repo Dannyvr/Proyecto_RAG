@@ -1,11 +1,11 @@
 """
 Sistema RAG Avanzado - Backend API
 ===================================
-Fase 1: Esqueleto del backend con endpoints base.
+Fase 3: Motor de Recuperación (Retrieval) y Generación.
 
 Endpoints:
-  POST /api/documents/upload  - Carga y procesamiento de documentos
-  POST /api/chat              - Consulta RAG (pregunta → respuesta)
+  POST /api/documents/upload  - Carga, procesa e indexa documentos en FAISS
+  POST /api/chat              - Consulta RAG real (retriever FAISS + Gemini LLM)
   POST /api/feedback          - Registro de feedback del usuario
 """
 
@@ -19,6 +19,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
+
+from document_processor import process_and_index_document, SUPPORTED_EXTENSIONS
+from rag_engine import run_rag_query, RAGResult
 
 # ---------------------------------------------------------------------------
 # Carga de variables de entorno
@@ -57,7 +60,7 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 4
     chunk_size: int = 1000
     chunk_overlap: int = 200
-    vector_store_path: str = "./vector_store"
+    vector_store_path: str = "./faiss_index"
     embeddings_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
     @property
@@ -122,7 +125,8 @@ async def lifespan(app: FastAPI):
     """Inicialización y limpieza al arrancar / apagar el servidor."""
     logger.info("🚀 Iniciando Sistema RAG (provider: %s, env: %s)",
                 settings.llm_provider, settings.app_env)
-    # TODO Fase 2: inicializar vector store y cargar índice persistente
+    logger.info("📂 Índice FAISS se cargará bajo demanda desde: %s",
+                settings.vector_store_path)
     yield
     logger.info("🛑 Sistema RAG detenido.")
 
@@ -137,7 +141,7 @@ app = FastAPI(
         "API backend para el sistema RAG con soporte de carga de documentos, "
         "consulta en lenguaje natural y retroalimentación de usuario."
     ),
-    version="0.1.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -163,6 +167,7 @@ class DocumentUploadResponse(BaseModel):
     document_id: str = Field(..., description="ID único del documento procesado")
     filename: str
     status: str
+    chunks_indexed: int = Field(0, description="Número de chunks indexados en el vector store")
     message: str
 
 
@@ -226,43 +231,72 @@ async def root():
 @app.post(
     "/api/documents/upload",
     response_model=DocumentUploadResponse,
-    status_code=status.HTTP_202_ACCEPTED,
+    status_code=status.HTTP_201_CREATED,
     tags=["Documentos"],
-    summary="Carga y procesa un documento para indexarlo en el vector store",
+    summary="Carga, procesa e indexa un documento en el vector store FAISS",
 )
 async def upload_document(file: UploadFile = File(...)):
     """
-    Recibe un archivo (PDF, DOCX o TXT), lo procesa y lo indexa.
+    Recibe un archivo (PDF, DOCX o TXT), extrae su texto, lo divide en chunks,
+    genera embeddings con Google Gemini y los almacena en el índice FAISS local.
 
-    **Fase 1:** respuesta mockeada.
-    **Fase 2:** implementar extracción de texto, chunking y embeddings.
+    - Formatos soportados: `.pdf`, `.docx`, `.txt`
+    - Respuesta: `document_id`, nombre del archivo y cantidad de chunks indexados.
     """
-    ALLOWED_CONTENT_TYPES = {
-        "application/pdf",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "text/plain",
-    }
+    filename = file.filename or "desconocido"
+    document_id = str(uuid.uuid4())
+    logger.info("Documento recibido: %s (document_id=%s)", filename, document_id)
 
-    if file.content_type not in ALLOWED_CONTENT_TYPES:
+    # Leer bytes completos del archivo en memoria
+    try:
+        file_bytes = await file.read()
+    except Exception as exc:
+        logger.error("No se pudo leer el archivo '%s': %s", filename, exc)
         raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"Tipo de archivo no soportado: {file.content_type}. "
-                   "Use PDF, DOCX o TXT.",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Error al leer el archivo. Asegúrate de que no esté corrupto.",
         )
 
-    document_id = str(uuid.uuid4())
-    logger.info("Documento recibido: %s (id=%s)", file.filename, document_id)
+    # Procesar e indexar
+    try:
+        chunks_indexed = process_and_index_document(
+            file_bytes=file_bytes,
+            filename=filename,
+            google_api_key=settings.google_api_key,
+            faiss_index_path=settings.vector_store_path,
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+        )
 
-    # TODO Fase 2: leer bytes, extraer texto, dividir en chunks, generar
-    #             embeddings y guardar en el vector store.
+    except ValueError as exc:
+        # Extensión no soportada o archivo sin texto extraíble
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=str(exc),
+        )
+
+    except RuntimeError as exc:
+        # Documento vacío / sin texto
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
+
+    except Exception as exc:
+        logger.error("Error inesperado procesando '%s': %s", filename, exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error interno al procesar el documento. Revisa los logs del servidor.",
+        )
 
     return DocumentUploadResponse(
         document_id=document_id,
-        filename=file.filename or "desconocido",
-        status="pending",
+        filename=filename,
+        status="indexed",
+        chunks_indexed=chunks_indexed,
         message=(
-            f"Documento '{file.filename}' recibido correctamente. "
-            "El procesamiento e indexación se implementarán en la Fase 2."
+            f"'{filename}' procesado correctamente. "
+            f"{chunks_indexed} chunks indexados en el vector store."
         ),
     )
 
@@ -279,11 +313,15 @@ async def upload_document(file: UploadFile = File(...)):
 )
 async def chat(request: ChatRequest):
     """
-    Recibe la pregunta del usuario, ejecuta el pipeline RAG y devuelve
-    la respuesta junto con las fuentes utilizadas.
+    Recibe la pregunta del usuario, ejecuta el pipeline RAG completo y devuelve
+    la respuesta generada por Gemini junto con las fuentes utilizadas.
 
-    **Fase 1:** respuesta mockeada.
-    **Fase 2:** integrar retriever + LLM con LangChain.
+    Pipeline:
+      1. Carga el índice FAISS local.
+      2. Recupera los chunks más relevantes vía similitud semántica.
+      3. Construye el prompt con el contexto recuperado.
+      4. Llama a Gemini (gemini-1.5-flash) para generar la respuesta.
+      5. Retorna la respuesta y los fragmentos fuente.
     """
     session_id = request.session_id or str(uuid.uuid4())
     message_id = str(uuid.uuid4())
@@ -293,28 +331,54 @@ async def chat(request: ChatRequest):
         session_id, message_id, request.question,
     )
 
-    # TODO Fase 2: ejecutar pipeline RAG
-    #   1. Generar embedding de la pregunta
-    #   2. Recuperar chunks relevantes del vector store
-    #   3. Construir prompt con contexto
-    #   4. Llamar a get_llm() para obtener la respuesta
-    #   5. Extraer fuentes de los documentos recuperados
+    # Ejecutar pipeline RAG
+    try:
+        result: RAGResult = run_rag_query(
+            question=request.question,
+            google_api_key=settings.google_api_key,
+            faiss_index_path=settings.vector_store_path,
+            gemini_model=settings.gemini_model,
+            top_k=settings.retrieval_top_k,
+        )
 
-    mock_answer = (
-        f"[MOCK] Respuesta a: '{request.question}'. "
-        "En la Fase 2 esta respuesta será generada por el pipeline RAG "
-        f"usando {settings.llm_provider.upper()} como proveedor LLM."
+    except FileNotFoundError as exc:
+        # El índice FAISS aún no existe → el usuario no ha subido documentos
+        logger.warning("Índice FAISS no encontrado: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "El vector store aún no contiene documentos. "
+                "Sube al menos un documento usando POST /api/documents/upload."
+            ),
+        )
+
+    except Exception as exc:
+        logger.error(
+            "Error en el pipeline RAG [session=%s]: %s", session_id, exc, exc_info=True
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error interno al procesar la consulta. Revisa los logs del servidor.",
+        )
+
+    # Construir respuesta con fuentes
+    sources = [
+        SourceDocument(
+            filename=chunk["source"],
+            page=chunk["page"],
+            excerpt=chunk["text"][:300],   # Primeros 300 caracteres del chunk
+        )
+        for chunk in result.source_chunks
+    ]
+
+    logger.info(
+        "Respuesta enviada [session=%s, msg=%s] — fuentes: %d",
+        session_id, message_id, len(sources),
     )
 
     return ChatResponse(
-        answer=mock_answer,
-        sources=[
-            SourceDocument(
-                filename="documento_ejemplo.pdf",
-                page=1,
-                excerpt="Fragmento relevante de ejemplo (mock).",
-            )
-        ],
+        answer=result.answer,
+        sources=sources,
         session_id=session_id,
         message_id=message_id,
     )

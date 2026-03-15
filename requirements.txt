@@ -15,25 +15,28 @@ python-dotenv==1.0.1
 
 # --- LangChain Core ---
 langchain==0.3.13
-langchain-core==0.3.28
+langchain-core==1.2.19
 langchain-community==0.3.13
 
 # --- LLM: Google Gemini (Google AI Studio) ---
-langchain-google-genai==2.0.7
-google-generativeai==0.8.3
+langchain-google-genai==4.2.1
+google-genai==1.67.0
 
 # --- LLM: Azure OpenAI (alternativa) ---
 langchain-openai==0.2.14
 openai==1.58.1
 
-# --- Embeddings y Vector Store ---
-faiss-cpu==1.9.0
-langchain-huggingface==0.1.2
+# --- Embeddings locales (HuggingFace / sentence-transformers) ---
+langchain-huggingface>=0.1.2
 sentence-transformers==3.3.1
+
+# --- Vector Store ---
+faiss-cpu==1.9.0
 
 # --- Procesamiento de documentos ---
 pypdf==5.1.0
 python-docx==1.1.2
+docx2txt==0.8          # Requerido por Docx2txtLoader de LangChain
 python-multipart==0.0.20
 
 # --- Utilidades ---
