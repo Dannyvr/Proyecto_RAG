@@ -1,9 +1,10 @@
 """
 Sistema RAG Avanzado - Backend API
 ===================================
-Fase 3: Motor de Recuperación (Retrieval) y Generación.
+Fase 4: Interfaz Web - Integración Frontend/Backend.
 
 Endpoints:
+  GET  /                      - Sirve la interfaz HTML (index.html)
   POST /api/documents/upload  - Carga, procesa e indexa documentos en FAISS
   POST /api/chat              - Consulta RAG real (retriever FAISS + Gemini LLM)
   POST /api/feedback          - Registro de feedback del usuario
@@ -11,11 +12,14 @@ Endpoints:
 
 import uuid
 import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, status
+from fastapi import FastAPI, UploadFile, File, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
@@ -45,7 +49,7 @@ class Settings(BaseSettings):
 
     # Google Gemini
     google_api_key: str = ""
-    gemini_model: str = "gemini-1.5-flash"
+    gemini_model: str = "gemini-2.5-flash"
 
     # Azure OpenAI
     azure_openai_api_key: str = ""
@@ -132,6 +136,20 @@ async def lifespan(app: FastAPI):
 
 
 # ---------------------------------------------------------------------------
+# Configuración de rutas para templates y static
+# ---------------------------------------------------------------------------
+
+# Obtener la ruta absoluta de la carpeta raíz del proyecto
+# (un nivel arriba de donde está main.py que ahora está en backend/)
+PROJECT_ROOT = Path(__file__).parent.parent
+TEMPLATES_DIR = PROJECT_ROOT / "frontend" / "templates"
+STATIC_DIR = PROJECT_ROOT / "frontend" / "static"
+
+logger.info("📁 Raíz del proyecto: %s", PROJECT_ROOT)
+logger.info("📁 Templates: %s", TEMPLATES_DIR)
+logger.info("📁 Static: %s", STATIC_DIR)
+
+# ---------------------------------------------------------------------------
 # Instancia principal de FastAPI
 # ---------------------------------------------------------------------------
 
@@ -141,7 +159,7 @@ app = FastAPI(
         "API backend para el sistema RAG con soporte de carga de documentos, "
         "consulta en lenguaje natural y retroalimentación de usuario."
     ),
-    version="0.3.0",
+    version="0.4.0",
     lifespan=lifespan,
 )
 
@@ -156,6 +174,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# Montaje de archivos estáticos
+# ---------------------------------------------------------------------------
+
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    logger.info("✅ Carpeta static montada en /static")
+else:
+    logger.warning("⚠️ Carpeta static no encontrada en %s", STATIC_DIR)
+
+# ---------------------------------------------------------------------------
+# Configuración de templates
+# ---------------------------------------------------------------------------
+
+if TEMPLATES_DIR.exists():
+    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    logger.info("✅ Carpeta templates configurada")
+else:
+    logger.error("❌ Carpeta templates no encontrada en %s", TEMPLATES_DIR)
+    templates = None
 
 # ===========================================================================
 # Modelos Pydantic (Schemas de request / response)
@@ -209,11 +248,29 @@ class FeedbackResponse(BaseModel):
 # ===========================================================================
 
 # ---------------------------------------------------------------------------
-# GET /  — Health check simple
+# GET /  — Página principal (index.html)
 # ---------------------------------------------------------------------------
 
-@app.get("/", tags=["Health"])
-async def root():
+@app.get("/", tags=["Frontend"])
+async def root(request: Request):
+    """Sirve la interfaz HTML principal (index.html)."""
+    if templates is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="La carpeta de templates no está configurada correctamente.",
+        )
+    return templates.TemplateResponse(
+        name="index.html",
+        context={"request": request},
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/health  — Health check para la API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/health", tags=["Health"])
+async def health_check():
     """Verifica que la API esté en línea."""
     return {
         "status": "ok",
@@ -320,7 +377,7 @@ async def chat(request: ChatRequest):
       1. Carga el índice FAISS local.
       2. Recupera los chunks más relevantes vía similitud semántica.
       3. Construye el prompt con el contexto recuperado.
-      4. Llama a Gemini (gemini-1.5-flash) para generar la respuesta.
+      4. Llama a Gemini (gemini-2.5-flash) para generar la respuesta.
       5. Retorna la respuesta y los fragmentos fuente.
     """
     session_id = request.session_id or str(uuid.uuid4())
