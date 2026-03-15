@@ -163,7 +163,7 @@ def run_rag_query(
     # 3. Configurar LLM (Gemini)
     logger.info("Configurando LLM: %s", gemini_model)
     llm = ChatGoogleGenerativeAI(
-        model=gemini_model,
+        model="gemini-2.5-flash",
         google_api_key=google_api_key,
         temperature=0.2,
     )
