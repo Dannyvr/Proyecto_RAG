@@ -552,9 +552,10 @@
 
             if (!question) return;
 
-            // Limpiar mensaje inicial si existe
-            if (chatMessages.querySelector('.text-center')) {
-                chatMessages.innerHTML = '';
+            // Remover mensaje de bienvenida si existe (solo el inicial)
+            const welcomeMsg = chatMessages.querySelector('div.text-center');
+            if (welcomeMsg) {
+                welcomeMsg.remove();
             }
 
             // Mostrar mensaje del usuario
@@ -641,78 +642,110 @@
                 messageId: messageId,
                 rating: null,
                 hasCommented: false,
+                hasSubmittedRating: false,  // Evita enviar like/dislike dos veces
             };
 
             // === MANEJADORES DE LIKE/DISLIKE ===
             likeBtn.addEventListener('click', (e) => {
                 e.preventDefault();
-                submitFeedback('like', messageId, likeBtn, dislikeBtn, feedbackStatus);
+                // Solo cambiar estado visual y abrir comentario
                 feedbackState.rating = 'like';
+                likeBtn.classList.add('text-green-600');
+                dislikeBtn.classList.remove('text-red-600');
+                // Abrir automáticamente el cuadro de comentarios
+                commentContainer.classList.remove('hidden');
+                commentInput.focus();
             });
 
             dislikeBtn.addEventListener('click', (e) => {
                 e.preventDefault();
-                submitFeedback('dislike', messageId, likeBtn, dislikeBtn, feedbackStatus);
+                // Solo cambiar estado visual y abrir comentario
                 feedbackState.rating = 'dislike';
+                dislikeBtn.classList.add('text-red-600');
+                likeBtn.classList.remove('text-green-600');
+                // Abrir automáticamente el cuadro de comentarios
+                commentContainer.classList.remove('hidden');
+                commentInput.focus();
             });
 
             // === MANEJADOR DEL BOTÓN COMENTARIO ===
             commentBtn.addEventListener('click', (e) => {
                 e.preventDefault();
-                commentContainer.classList.toggle('hidden');
-                if (!commentContainer.classList.contains('hidden')) {
-                    commentInput.focus();
+                // Solo abre si no hay rating, si hay rating ya se abrió automáticamente
+                if (!feedbackState.rating) {
+                    commentContainer.classList.toggle('hidden');
+                    if (!commentContainer.classList.contains('hidden')) {
+                        commentInput.focus();
+                    }
                 }
             });
 
             // === MANEJADORES DEL COMENTARIO ===
             commentSubmitBtn.addEventListener('click', async () => {
                 const comment = commentInput.value.trim();
-                if (!comment) return;
+                
+                // Permitir enviar incluso sin comentario si hay like/dislike
+                if (!comment && !feedbackState.rating) {
+                    return;
+                }
 
                 commentSubmitBtn.disabled = true;
                 commentSubmitBtn.innerHTML = '<div class="inline-block loading-spinner mr-1"></div> Enviando...';
 
                 try {
+                    // Enviar todo junto: rating + comentario
                     const response = await fetch(`${API_BASE}/feedback`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             message_id: messageId,
-                            rating: feedbackState.rating || 'neutral',
-                            comment: comment,
+                            rating: feedbackState.rating || 'neutral',  // Like/Dislike o neutral si solo comentario
+                            comment: comment || null,  // null si no hay comentario
                         }),
                     });
 
                     if (!response.ok) {
-                        throw new Error('Error al enviar comentario');
+                        throw new Error('Error al enviar feedback');
                     }
 
-                    const data = await response.json();
                     commentContainer.classList.add('hidden');
                     feedbackStatus.classList.remove('hidden');
                     feedbackStatus.className = 'feedback-status text-xs mt-2 p-2 rounded text-center bg-green-100 text-green-800';
-                    feedbackStatus.innerHTML = '<i class="fas fa-check-circle"></i> Comentario enviado. ¡Gracias!';
+                    feedbackStatus.innerHTML = '<i class="fas fa-check-circle"></i> Feedback enviado. ¡Gracias!';
                     
                     setTimeout(() => {
                         feedbackStatus.classList.add('hidden');
                     }, 4000);
 
                     feedbackState.hasCommented = true;
+                    // Deshabilitar botones después de enviar
+                    likeBtn.style.pointerEvents = 'none';
+                    likeBtn.style.opacity = '0.5';
+                    dislikeBtn.style.pointerEvents = 'none';
+                    dislikeBtn.style.opacity = '0.5';
+                    commentBtn.style.pointerEvents = 'none';
+                    commentBtn.style.opacity = '0.5';
                 } catch (error) {
                     feedbackStatus.classList.remove('hidden');
                     feedbackStatus.className = 'feedback-status text-xs mt-2 p-2 rounded text-center bg-red-100 text-red-800';
-                    feedbackStatus.innerHTML = '<i class="fas fa-exclamation-circle"></i> Error al enviar comentario';
+                    feedbackStatus.innerHTML = '<i class="fas fa-exclamation-circle"></i> Error al enviar feedback';
                 } finally {
                     commentSubmitBtn.disabled = false;
                     commentSubmitBtn.innerHTML = 'Enviar';
-                    commentInput.value = '';
                 }
             });
 
             commentCancelBtn.addEventListener('click', () => {
+                // Reiniciar TODO
                 commentContainer.classList.add('hidden');
                 commentInput.value = '';
+                likeBtn.classList.remove('text-green-600');
+                dislikeBtn.classList.remove('text-red-600');
+                feedbackStatus.classList.add('hidden');
+                // Reiniciar estado
+                feedbackState.rating = null;
+                feedbackState.hasCommented = false;
+                feedbackState.hasSubmittedRating = false;
             });
 
             // === MANEJADOR DE VER FUENTES ===

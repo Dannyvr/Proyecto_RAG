@@ -199,7 +199,7 @@ class ChatResponse(BaseModel):
 
 class FeedbackRequest(BaseModel):
     message_id: str = Field(..., description="ID del mensaje que recibe feedback")
-    rating: Literal["like", "dislike"] = Field(..., description="Valoración del usuario")
+    rating: Literal["like", "dislike", "neutral"] = Field(..., description="Valoración del usuario")
     comment: str | None = Field(None, max_length=1000, description="Comentario opcional")
 
 
@@ -549,7 +549,7 @@ async def submit_feedback(request: FeedbackRequest):
         )
 
     # Retornar confirmación exitosa
-    emoji = "👍" if request.rating == "like" else "👎"
+    emoji = "👍" if request.rating == "like" else "👎" if request.rating == "dislike" else "💬"
     return FeedbackResponse(
         feedback_id=feedback_id,
         message=f"Feedback {emoji} registrado correctamente. ¡Gracias por tu opinión!",
